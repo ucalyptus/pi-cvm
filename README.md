@@ -94,4 +94,3 @@ cvm cp NAME:/path ~/dest · cvm list                         # artifacts + footp
 - No snapshot/C-R or VM templating — 0.72s is the cold-boot floor; use warm pools below that.
 - `container system property` is read-only; no per-container disk cap (thin-provisioned 504G virtual, real footprint ≈ `du -sh ~/Library/Application\ Support/com.apple.container/containers/<name>/`).
 - `container exec` syntax: options **before** container-id; no `--` separator.
-
