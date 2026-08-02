@@ -1,0 +1,14 @@
+{
+  "name": "pi-cvm",
+  "version": "0.1.0",
+  "description": "Apple Container VM sandbox tools for pi — execute arbitrary commands/one-off jobs in disposable isolated Linux VMs at microVM speed (one-shot 0.72s, warm pool 0.04s, teardown 0.18s); ClamAV scan; copy artifacts out.",
+  "keywords": ["pi-package"],
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "scripts": {
+    "install": "bash install.sh"
+  }
+}
