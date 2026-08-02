@@ -11,6 +11,26 @@ Execute **any** command or one-off job inside a disposable Apple container Linux
 
 Isolation is the point: untrusted code, sketchy downloads, scraper scripts, build pipelines, malware triage — none of it ever touches the host filesystem or network. The VM is a disposable microVM (Kata 3.28 kernel, boots in ~90ms to init), and after the task it's deleted; artifacts come out through `container cp`.
 
+## Context and Background
+
+This project comes from a conversation (Suraj Parmar, recorded in [/logbook#320](https://github.com//logbook/issues/320)) about Apple's built-in container system — showcased at WWDC — as a way to run agents safely, seen through a **brains vs. hands** lens:
+
+> - brain is **outside** the sandbox
+> - hands are **inside** the sandbox
+> - brain can stop the sandbox
+> - hands can delete files but nothing on the host is ever affected
+> - hands never see credentials
+
+`pi-cvm` is that design made concrete on this Mac:
+
+| Brains-vs-hands principle | Where it lives in pi-cvm |
+|---|---|
+| Brain outside the sandbox | the pi session (durable, native tools, sessions persist) |
+| Hands inside the sandbox | each `cvm run` / `pool_start` container VM (ephemeral, disposable) |
+| Brain can stop the sandbox | `cvm kill` / `action=kill` tears the VM down in 0.18s |
+| Hands can delete files, host unaffected | container rootfs is a thin-provisioned VM disk; `kill && rm -f` leaves zero host footprint |
+| Hands never see credentials | secrets stay in `~/.env`/`~/.secrets`; passed only as `-e KEY=val` at exec time, never baked into images |
+
 ## Install
 
 ```bash
