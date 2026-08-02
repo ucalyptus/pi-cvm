@@ -21,7 +21,7 @@ This project comes from a conversation (Suraj Parmar) about Apple's built-in con
 > - hands can delete files but nothing on the host is ever affected
 > - hands never see credentials
 
-![Brains vs. hands — the design conversation that inspired this project](docs/context-screenshot.png)
+![Brains vs. hands — the design conversation that inspired this project](docs/context-screenshot.jpg)
 
 `pi-cvm` is that design made concrete on this Mac:
 
