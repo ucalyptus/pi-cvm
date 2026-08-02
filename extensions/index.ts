@@ -12,6 +12,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { execFileSync, execSync } from "node:child_process";
 import os from "node:os";
@@ -67,17 +68,23 @@ export default function cvmExtension(pi: ExtensionAPI) {
 			"installs, scraping, builds, media processing, malware triage, or risky downloads — then copy results out and auto-teardown. " +
 			"Includes: run (one-shot), pool_start/exec (warm pool), scan (ClamAV in-VM), dlscan (download -> scan -> quarantine pipeline), " +
 			"cp, kill, list.",
+		promptSnippet: "Run commands/one-off jobs inside disposable isolated Apple container Linux VMs on this Mac (cvm: run/pool/exec/scan/dlscan/cp/kill/list)",
+		promptGuidelines: [
+			"Use cvm for any task that needs an isolated Linux sandbox (untrusted code, risky downloads, scraping, builds) — it runs in a disposable VM that is deleted afterwards; nothing touches the host.",
+			"Use cvm dlscan for torrent/magnet downloads: it downloads inside the VM, ClamAV-scans, copies out with a quarantine flag, and tears down.",
+			"When cvm run needs no output captured (long jobs), set detached=true and poll via action=list.",
+		],
 		parameters: Type.Object({
-			action: Type.Union([
-				Type.Literal("run", { description: "one-shot task VM; runs, prints output, auto-deletes" }),
-				Type.Literal("pool_start", { description: "start a long-lived warm-pool VM (sleep 86400)" }),
-				Type.Literal("exec", { description: "run a command inside a running pool VM (~40ms)" }),
-				Type.Literal("kill", { description: "fast teardown: kill + rm -f (0.18s)" }),
-				Type.Literal("cp", { description: "copy a file/folder out of a VM to the host" }),
-				Type.Literal("list", { description: "list containers + host footprint" }),
-				Type.Literal("scan", { description: "ClamAV scan a path inside a running VM (installs clamav on demand)" }),
-				Type.Literal("dlscan", { description: "example pipeline: download a magnet inside the VM, ClamAV scan, copy to host with quarantine flag, auto-teardown" }),
-			], { description: "what to do" }),
+			action: StringEnum([
+				"run",
+				"pool_start",
+				"exec",
+				"kill",
+				"cp",
+				"list",
+				"scan",
+				"dlscan",
+			] as const),
 			name: Type.String({ description: "container name (e.g. agent-<task> or pool-1)" }),
 			command: Type.Optional(Type.Array(Type.String(), { description: "argv to run inside the VM, e.g. [\"sh\",\"-c\",\"apt-get install -y ripgrep\"]" })),
 			image: Type.Optional(Type.String({ description: `base image (default ${DEFAULT_IMAGE})` })),
@@ -93,6 +100,9 @@ export default function cvmExtension(pi: ExtensionAPI) {
 			keep_vm: Type.Optional(Type.Boolean({ description: "dlscan: keep the VM running after the pipeline (default tears down)" })),
 		}),
 		async execute(_toolCallId, params, signal) {
+			if (signal?.aborted) {
+				return { content: [{ type: "text" as const, text: "cvm: cancelled" }], details: {} };
+			}
 			const action = params.action as string;
 			const name = params.name as string;
 			const cmd = (params.command as string[] | undefined) ?? [];
