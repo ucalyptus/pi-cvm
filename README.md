@@ -13,7 +13,7 @@ Isolation is the point: untrusted code, sketchy downloads, scraper scripts, buil
 
 ## Context and Background
 
-This project comes from a conversation (Suraj Parmar) about Apple's built-in container system — showcased at WWDC — as a way to run agents safely, seen through a **brains vs. hands** lens:
+This project comes from a conversation [Suraj Parmar](https://x.com/parmarsuraj99) about Apple's built-in container system — showcased at WWDC — as a way to run agents safely, seen through a **brains vs. hands** lens:
 
 > - brain is **outside** the sandbox
 > - hands are **inside** the sandbox
