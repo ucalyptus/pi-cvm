@@ -14,51 +14,86 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { execFileSync, execSync } from "node:child_process";
+import { execFile, execSync } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdirSync } from "node:fs";
 import os from "node:os";
 
 const DEFAULT_IMAGE = "ubuntu:24.04";
 const CONTAINER = "container";
+const pExecFile = promisify(execFile);
 
-function run(cliArgs: string[], opts: { timeout?: number; signal?: AbortSignal } = {}): string {
+// Async on purpose: execFileSync ignores AbortSignal at runtime, so an aborted
+// signal would NOT cancel a long `container run`. Async execFile honors it.
+async function run(cliArgs: string[], opts: { timeout?: number; signal?: AbortSignal } = {}): Promise<string> {
 	try {
-		return execFileSync(CONTAINER, cliArgs, {
+		const { stdout } = await pExecFile(CONTAINER, cliArgs, {
 			encoding: "utf8",
 			timeout: opts.timeout ?? 120_000,
 			signal: opts.signal,
 			maxBuffer: 32 * 1024 * 1024,
-		}).trim();
+		});
+		return stdout.trim();
 	} catch (e: any) {
-		const err = e as { status?: number; stderr?: string; stdout?: string };
-		const detail = (err.stderr || err.stdout || String(e)).trim().split("\n").slice(-6).join("\n");
-		throw new Error(`container ${cliArgs.join(" ")} failed${err.status !== undefined ? ` (exit ${err.status})` : ""}:\n${detail}`);
+		if (opts.signal?.aborted) throw new Error("cvm: cancelled");
+		const detail = (e.stderr || e.stdout || String(e)).trim().split("\n").slice(-6).join("\n");
+		const code = typeof e.code === "number" ? ` (exit ${e.code})` : "";
+		throw new Error(`container ${cliArgs.join(" ")} failed${code}:\n${detail}`);
 	}
 }
 
-function isRunning(name: string): boolean {
+async function isRunning(name: string): Promise<boolean> {
 	try {
-		const out = run(["list"], { timeout: 10_000 });
+		const out = await run(["list"], { timeout: 10_000 });
 		return out.split("\n").slice(1).some((l) => l.trim().split(/\s+/)[0] === name);
 	} catch {
 		return false;
 	}
 }
 
-function waitGone(name: string, timeoutMs = 300_000): void {
+async function waitGone(name: string, timeoutMs = 300_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
-	while (isRunning(name)) {
+	while (await isRunning(name)) {
 		if (Date.now() > deadline) throw new Error(`cvm: '${name}' still running after ${timeoutMs / 1000}s`);
-		execSync("sleep 0.2");
+		await new Promise((r) => setTimeout(r, 200));
 	}
 }
 
-function listContainers(): string {
-	const out = run(["list"], { timeout: 10_000 });
+async function listContainers(): Promise<string> {
+	const out = await run(["list"], { timeout: 10_000 });
 	return out || "(no containers)";
 }
 
+export type CvmDetails = { path?: string; md5?: string; seconds?: string };
+
+const cvmParameters = Type.Object({
+	action: StringEnum([
+		"run",
+		"pool_start",
+		"exec",
+		"kill",
+		"cp",
+		"list",
+		"scan",
+		"dlscan",
+	] as const),
+	name: Type.String({ description: "container name (e.g. agent-<task> or pool-1)" }),
+	command: Type.Optional(Type.Array(Type.String(), { description: "argv to run inside the VM, e.g. [\"sh\",\"-c\",\"apt-get install -y ripgrep\"]" })),
+	image: Type.Optional(Type.String({ description: `base image (default ${DEFAULT_IMAGE})` })),
+	cpus: Type.Optional(Type.Number({ description: "vCPUs (default 2)" })),
+	memory: Type.Optional(Type.String({ description: "memory e.g. \"4g\" (default 4g)" })),
+	network_none: Type.Optional(Type.Boolean({ description: "air-gap: --network none --no-dns" })),
+	detached: Type.Optional(Type.Boolean({ description: "run: return after boot, poll until auto-deleted (no output capture)" })),
+	source_path: Type.Optional(Type.String({ description: "cp: 'NAME:/path/in/vm'" })),
+	dest_path: Type.Optional(Type.String({ description: "cp: host destination path" })),
+	scan_path: Type.Optional(Type.String({ description: "scan: absolute path inside the VM (file or dir)" })),
+	magnet: Type.Optional(Type.String({ description: "dlscan: magnet: URI to download" })),
+	dest_dir: Type.Optional(Type.String({ description: "dlscan: host destination dir (default ~/Downloads/Movies)" })),
+	keep_vm: Type.Optional(Type.Boolean({ description: "dlscan: keep the VM running after the pipeline (default tears down)" })),
+});
+
 export default function cvmExtension(pi: ExtensionAPI) {
-	pi.registerTool({
+	pi.registerTool<typeof cvmParameters, CvmDetails>({
 		name: "cvm",
 		label: "Apple Container VM Sandbox",
 		description:
@@ -74,31 +109,7 @@ export default function cvmExtension(pi: ExtensionAPI) {
 			"Use cvm dlscan for torrent/magnet downloads: it downloads inside the VM, ClamAV-scans, copies out with a quarantine flag, and tears down.",
 			"When cvm run needs no output captured (long jobs), set detached=true and poll via action=list.",
 		],
-		parameters: Type.Object({
-			action: StringEnum([
-				"run",
-				"pool_start",
-				"exec",
-				"kill",
-				"cp",
-				"list",
-				"scan",
-				"dlscan",
-			] as const),
-			name: Type.String({ description: "container name (e.g. agent-<task> or pool-1)" }),
-			command: Type.Optional(Type.Array(Type.String(), { description: "argv to run inside the VM, e.g. [\"sh\",\"-c\",\"apt-get install -y ripgrep\"]" })),
-			image: Type.Optional(Type.String({ description: `base image (default ${DEFAULT_IMAGE})` })),
-			cpus: Type.Optional(Type.Number({ description: "vCPUs (default 2)" })),
-			memory: Type.Optional(Type.String({ description: "memory e.g. \"4g\" (default 4g)" })),
-			network_none: Type.Optional(Type.Boolean({ description: "air-gap: --network none --no-dns" })),
-			detached: Type.Optional(Type.Boolean({ description: "run: return after boot, poll until auto-deleted (no output capture)" })),
-			source_path: Type.Optional(Type.String({ description: "cp: 'NAME:/path/in/vm'" })),
-			dest_path: Type.Optional(Type.String({ description: "cp: host destination path" })),
-			scan_path: Type.Optional(Type.String({ description: "scan: absolute path inside the VM (file or dir)" })),
-			magnet: Type.Optional(Type.String({ description: "dlscan: magnet: URI to download" })),
-			dest_dir: Type.Optional(Type.String({ description: "dlscan: host destination dir (default ~/Downloads/Movies)" })),
-			keep_vm: Type.Optional(Type.Boolean({ description: "dlscan: keep the VM running after the pipeline (default tears down)" })),
-		}),
+		parameters: cvmParameters,
 		async execute(_toolCallId, params, signal) {
 			if (signal?.aborted) {
 				return { content: [{ type: "text" as const, text: "cvm: cancelled" }], details: {} };
@@ -115,44 +126,44 @@ export default function cvmExtension(pi: ExtensionAPI) {
 				case "run": {
 					const args = ["run", "--rm", "--name", name, ...(cpus ? ["--cpus", String(cpus)] : []), "--memory", mem, ...net, img, ...(cmd.length ? cmd : ["sh", "-c", "echo cvm-ok"])];
 					if (params.detached) {
-						run(["run", "-d", ...args.slice(1)], { signal });
-						waitGone(name);
+						await run(["run", "-d", ...args.slice(1)], { signal });
+						await waitGone(name);
 						return { content: [{ type: "text" as const, text: `cvm: '${name}' ran and was auto-deleted.` }], details: {} };
 					}
-					const out = run(args, { signal, timeout: 3_600_000 });
+					const out = await run(args, { signal, timeout: 3_600_000 });
 					return { content: [{ type: "text" as const, text: out || `cvm: '${name}' finished (no output).` }], details: {} };
 				}
 				case "pool_start": {
 					const args = ["run", "-d", "--name", name, ...(cpus ? ["--cpus", String(cpus)] : []), "--memory", mem, ...net, img, "sleep", "86400"];
-					run(args, { signal });
+					await run(args, { signal });
 					return { content: [{ type: "text" as const, text: `cvm: pool '${name}' ready — warm exec ~0.04s. Use action=exec.` }], details: {} };
 				}
 				case "exec": {
-					if (!isRunning(name)) throw new Error(`cvm: '${name}' not running — start a pool first (action=pool_start).`);
+					if (!(await isRunning(name))) throw new Error(`cvm: '${name}' not running — start a pool first (action=pool_start).`);
 					const args = ["exec", name, ...(cmd.length ? cmd : ["sh", "-c", "echo ok"])];
-					const out = run(args, { signal });
+					const out = await run(args, { signal });
 					return { content: [{ type: "text" as const, text: out || "(no output)" }], details: {} };
 				}
 				case "kill": {
-					try { run(["kill", name], { signal }); } catch { /* already stopped */ }
-					try { run(["rm", "-f", name], { signal }); } catch { /* already gone */ }
+					try { await run(["kill", name], { signal }); } catch { /* already stopped */ }
+					try { await run(["rm", "-f", name], { signal }); } catch { /* already gone */ }
 					return { content: [{ type: "text" as const, text: `cvm: '${name}' torn down (0.18s).` }], details: {} };
 				}
 				case "cp": {
 					const src = params.source_path as string;
 					const dst = params.dest_path as string;
 					if (!src || !dst) throw new Error("cvm cp: source_path ('NAME:/path') and dest_path required");
-					run(["cp", src, dst], { signal });
+					await run(["cp", src, dst], { signal });
 					return { content: [{ type: "text" as const, text: `cvm: copied ${src} -> ${dst}` }], details: {} };
 				}
 				case "list":
-					return { content: [{ type: "text" as const, text: listContainers() }], details: {} };
+					return { content: [{ type: "text" as const, text: await listContainers() }], details: {} };
 
 				case "scan": {
 					const scanPath = params.scan_path as string | undefined;
 					if (!scanPath) throw new Error("cvm scan: 'scan_path' (absolute path inside the VM) required");
-					if (!isRunning(name)) throw new Error(`cvm: '${name}' not running — start one first (pool_start or run -d)`);
-					const out = run([
+					if (!(await isRunning(name))) throw new Error(`cvm: '${name}' not running — start one first (pool_start or run -d)`);
+					const out = await run([
 						"exec", name, "bash", "-c",
 						`command -v clamscan >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq clamav >/dev/null 2>&1 && freshclam >/dev/null 2>&1 || true); ` +
 						`clamscan --max-filesize=10G --max-scansize=10G -r "${scanPath}" 2>&1 | tail -8`,
@@ -165,11 +176,11 @@ export default function cvmExtension(pi: ExtensionAPI) {
 					if (!magnet || !magnet.startsWith("magnet:")) throw new Error("cvm dlscan: a valid 'magnet' param is required");
 					const destRaw = (params.dest_dir as string | undefined) ?? "~/Downloads/Movies";
 					const dest = destRaw.replace(/^~\//, `${os.homedir()}/`);
-					execSync(`mkdir -p "${dest}"`);
+					mkdirSync(dest, { recursive: true });
 					const t0 = Date.now();
 
 					// Boot a detached VM that stays up for the whole pipeline
-					run(["run", "-d", "--name", name, ...(cpus ? ["--cpus", String(cpus)] : []), "--memory", mem, img, "sleep", "86400"], { signal });
+					await run(["run", "-d", "--name", name, ...(cpus ? ["--cpus", String(cpus)] : []), "--memory", mem, img, "sleep", "86400"], { signal });
 					try {
 						const pipeline = [
 							"set -e",
@@ -192,7 +203,7 @@ export default function cvmExtension(pi: ExtensionAPI) {
 							`echo DLPATH=$MKV`,
 							`clamscan --max-filesize=10G --max-scansize=10G "$MKV" 2>&1 | tail -4`,
 						].join("\n");
-						const out = run(["exec", name, "bash", "-c", pipeline], { signal, timeout: 3_600_000 });
+						const out = await run(["exec", name, "bash", "-c", pipeline], { signal, timeout: 3_600_000 });
 
 						const m = out.match(/DLPATH=(\S+)/);
 						if (!m) throw new Error(`dlscan: pipeline failed\n${out}`);
@@ -200,7 +211,7 @@ export default function cvmExtension(pi: ExtensionAPI) {
 						const basename = dlpath.split("/").pop()!;
 						const hostPath = `${dest}/${basename}`;
 
-						run(["cp", `${name}:${dlpath}`, hostPath], { signal });
+						await run(["cp", `${name}:${dlpath}`, hostPath], { signal });
 						const uuid = execSync("uuidgen").toString().trim();
 						execSync(`xattr -w com.apple.quarantine "0083;${uuid};pi-cvm;" "${hostPath}"`);
 						const md5 = execSync(`md5 -q "${hostPath}"`).toString().trim();
@@ -214,8 +225,8 @@ export default function cvmExtension(pi: ExtensionAPI) {
 						};
 					} finally {
 						if (!params.keep_vm) {
-							try { run(["kill", name], { signal }); } catch { /* gone */ }
-							try { run(["rm", "-f", name], { signal }); } catch { /* gone */ }
+							try { await run(["kill", name], { signal }); } catch { /* gone */ }
+							try { await run(["rm", "-f", name], { signal }); } catch { /* gone */ }
 						}
 					}
 				}
@@ -238,8 +249,8 @@ export default function cvmExtension(pi: ExtensionAPI) {
 			const sep = rest.indexOf("--");
 			const cmd = sep >= 0 ? rest.slice(sep + 1) : [];
 			try {
-				const out = run(["run", "--rm", "--name", name, DEFAULT_IMAGE, ...(cmd.length ? cmd : ["sh", "-c", "echo cvm-ok"])], { timeout: 3_600_000 });
-				ctx.ui.notify(`cvm: ${out || "done"}`, "success");
+				const out = await run(["run", "--rm", "--name", name, DEFAULT_IMAGE, ...(cmd.length ? cmd : ["sh", "-c", "echo cvm-ok"])], { timeout: 3_600_000 });
+				ctx.ui.notify(`cvm: ${out || "done"}`, "info");
 			} catch (e: any) {
 				ctx.ui.notify(`cvm error: ${e.message}`, "error");
 			}
